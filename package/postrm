@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = purge ]; then
+    rm -f /var/run/itouch.lock /var/run/itouch.sock /var/log/itouch.log
+fi
