@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+if launchctl list com.itouch.remote >/dev/null 2>&1; then
+    launchctl unload /Library/LaunchDaemons/com.itouch.remote.plist
+fi

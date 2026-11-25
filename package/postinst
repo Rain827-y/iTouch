@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    plist=/Library/LaunchDaemons/com.itouch.remote.plist
+    if launchctl list com.itouch.remote >/dev/null 2>&1; then
+        launchctl unload "$plist"
+    fi
+    launchctl load "$plist"
+fi
