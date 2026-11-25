@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PHONE_COMMAND = "/usr/local/bin/itouch"
-DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.3.0_iphoneos-arm.deb"
+DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.3.1_iphoneos-arm.deb"
 DEFAULT_TOOLS = (ROOT / "../../Games/ios/Clutch/_tools").resolve()
 MAX_SCROLL_STEPS = 8
 MIN_SCROLL_INTERVAL_MS = 20
