@@ -76,7 +76,24 @@ with TouchStream(ssh) as touch:
 
 `x0, y0` 和 `x1, y1` 是相对画面内容区域的归一化坐标。界面方向值与 `usb_orientation(device)` 相同。鼠标停住时暂停发送移动点即可，Python 客户端会自动维持按住。松开后，App 可按自己的规则执行翻页吸附或惯性滚动。窗口失焦、捕获丢失或界面旋转时可调用 `up()` 结束当前手势。退出流会话或掉线时，手机会释放触点。
 
-其他语言可通过 SSH 执行 `/usr/local/bin/itouch stream`，保持标准输入和输出打开。握手返回 `OK stream/1`。后续每行发送一条 `down X Y`、`move X Y`、`up` 或 `ping`，每条成功命令返回一行 `OK`，错误返回 `ERR …` 并结束流。坐标是手机原生竖屏的 0 到 1。按住且没有移动时，每秒发一次 `ping`，手机在最后一条有效指令后 3 秒自动抬起并关闭流。
+其他语言可通过 SSH 执行 `/usr/local/bin/itouch stream`，保持标准输入和输出打开。握手返回 `OK stream/1`。后续每行发送一条 `down X Y`、`move X Y`、`up`、`ping` 或 `scroll STEPS [X Y [INTERVAL_MS]]`。每条成功命令返回一行 `OK`，错误返回 `ERR …` 并结束流。`down` 和 `move` 使用手机原生竖屏的 0 到 1 坐标。按住且没有移动时，每秒发一次 `ping`，手机在最后一条有效指令后 3 秒自动抬起并关闭流。
+
+## 鼠标滚轮
+
+iTouch 1.2.0 在同一个 `TouchStream` 上提供 `touch.scroll(steps, x=0.5, y=0.5)`。把每次鼠标滚轮事件的格数传进来。正数向上浏览，负数向下浏览，每次可传 1 到 8 格。可选的 `x`、`y` 是鼠标在正向显示画面中的归一化位置，范围为 0 到 1，手机会根据当前界面方向换算。先松开左键拖动，再发送滚轮事件。
+
+```python
+# 放在 GUI 的滚轮回调中。WheelDelta 为 120 时代表向上一格。
+if steps := int(wheel_delta / 120):
+    touch.scroll(max(-8, min(8, steps)), cursor_x, cursor_y)
+```
+
+Python 按收到滚轮事件的间隔调节速度，快滚时手势移动得更远、更快。相邻滞留的同向事件会合并，一次合并最多 8 格。对发送原始协议的客户端，`INTERVAL_MS` 是两次滚轮事件的间隔，范围为 20–200 毫秒，省略时用 160 毫秒。高精度触控板的部分格数可在 GUI 端累计成完整格数后再发送。
+
+```powershell
+python .\itouch.py --host 192.0.2.10 scroll -1
+ssh -p 2222 root@192.0.2.10 itouch scroll 1 0.5 0.6 35
+```
 
 ## 安装与卸载
 
@@ -85,7 +102,7 @@ python .\itouch.py install
 python .\itouch.py uninstall
 ```
 
-`install` 通过 SSH 上传 `dist\com.itouch.remote_1.1.1_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。Wi-Fi 安装时在 `install` 前加 `--host` 和手机 IP。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
+`install` 通过 SSH 上传 `dist\com.itouch.remote_1.2.0_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。Wi-Fi 安装时在 `install` 前加 `--host` 和手机 IP。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
 
 手机端服务由 `launchd` 管理，日志在 `/var/log/itouch.log`。若设备重启后需要重新激活越狱，激活后先运行 `ping`。若 SSH 正常但服务未加载，可以通过手机 SSH 执行 `launchctl load /Library/LaunchDaemons/com.itouch.remote.plist`。
 
@@ -99,4 +116,4 @@ iOS 10 的触控事件由 IOKit 的 IOHID 接口提交给系统，再交给当�
 python .\build.py --clang <clang路径> --lld <ld64.lld路径> --llvm-nm <llvm-nm路径> --headers <any-darwin-any路径> --signer <rcodesign路径>
 ```
 
-输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.1.1_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。
+输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.2.0_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。

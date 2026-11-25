@@ -17,8 +17,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PHONE_COMMAND = "/usr/local/bin/itouch"
-DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.1.1_iphoneos-arm.deb"
+DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.2.0_iphoneos-arm.deb"
 DEFAULT_TOOLS = (ROOT / "../../Games/ios/Clutch/_tools").resolve()
+MAX_SCROLL_STEPS = 8
+MIN_SCROLL_INTERVAL_MS = 20
+MAX_SCROLL_INTERVAL_MS = 200
+DEFAULT_SCROLL_INTERVAL_MS = 160
 ORIENTATIONS = {
     "portrait": 1,
     "upside-down": 2,
@@ -192,6 +196,20 @@ def native_point(x, y, orientation):
     return ((x, y), (1 - x, 1 - y), (1 - y, x), (y, 1 - x))[orientation - 1]
 
 
+def validate_scroll(steps, x, y, interval_ms):
+    if type(steps) is not int or not 1 <= abs(steps) <= MAX_SCROLL_STEPS:
+        raise ValueError(f"Scroll steps must be a nonzero integer from -{MAX_SCROLL_STEPS} to {MAX_SCROLL_STEPS}.")
+    if not all(math.isfinite(v) and 0 <= v <= 1 for v in (x, y)):
+        raise ValueError("Scroll coordinates must be between 0 and 1.")
+    if type(interval_ms) is not int or not MIN_SCROLL_INTERVAL_MS <= interval_ms <= MAX_SCROLL_INTERVAL_MS:
+        raise ValueError(f"Scroll interval must be an integer from "
+                         f"{MIN_SCROLL_INTERVAL_MS} to {MAX_SCROLL_INTERVAL_MS} ms.")
+
+
+def scroll_words(steps, x, y, interval_ms):
+    return f"scroll {steps} {x:.9f} {y:.9f} {interval_ms}"
+
+
 class TouchStream:
     """One live finger over SSH, with queued events and a held-touch heartbeat."""
 
@@ -204,6 +222,8 @@ class TouchStream:
         self.closed = False
         self.error = None
         self.channel = None
+        self.last_scroll_time = 0
+        self.last_scroll_steps = 0
 
     @staticmethod
     def reply(reader, expected):
@@ -247,13 +267,14 @@ class TouchStream:
                     if self.channel.closed:
                         raise RuntimeError("The iTouch stream closed.")
                     if got_work:
-                        name, line = self.pending.popleft()
+                        name, payload = self.pending.popleft()
                     elif held:
-                        name, line = "ping", b"ping\n"
+                        name, payload = "ping", "ping"
                     else:
                         continue
                     self.sending = True
-                self.channel.sendall(line)
+                line = scroll_words(*payload) if name == "scroll" else payload
+                self.channel.sendall((line + "\n").encode("ascii"))
                 self.reply(self.reader, "OK")
                 if name in ("down", "up"):
                     held = name == "down"
@@ -282,9 +303,9 @@ class TouchStream:
             if name in ("down", "move"):
                 if not all(math.isfinite(v) and 0 <= v <= 1 for v in (x, y)):
                     raise ValueError("Live touch coordinates must be between 0 and 1.")
-                line = f"{name} {x:.9f} {y:.9f}\n".encode("ascii")
+                line = f"{name} {x:.9f} {y:.9f}"
             else:
-                line = b"up\n"
+                line = "up"
             if name == "move" and self.pending and self.pending[-1][0] == "move":
                 self.pending[-1] = (name, line)
             else:
@@ -304,6 +325,29 @@ class TouchStream:
     def up(self):
         """Lift at the last position."""
         self._enqueue("up")
+
+    def scroll(self, steps, x=0.5, y=0.5):
+        """Queue wheel steps at upright screen coordinates, adapting to the event rate."""
+        validate_scroll(steps, x, y, DEFAULT_SCROLL_INTERVAL_MS)
+        with self.condition:
+            self._check()
+            if self.pressed:
+                raise ValueError("Release the live touch before scrolling.")
+            now = time.monotonic()
+            interval_ms = DEFAULT_SCROLL_INTERVAL_MS
+            if self.last_scroll_steps * steps > 0:
+                elapsed_ms = round((now - self.last_scroll_time) * 1000)
+                interval_ms = max(MIN_SCROLL_INTERVAL_MS, min(MAX_SCROLL_INTERVAL_MS, elapsed_ms))
+            self.last_scroll_time = now
+            self.last_scroll_steps = steps
+            if self.pending and self.pending[-1][0] == "scroll":
+                previous, previous_x, previous_y, _ = self.pending[-1][1]
+                if previous * steps > 0 and abs(x - previous_x) < 0.02 and abs(y - previous_y) < 0.02:
+                    merged = max(-MAX_SCROLL_STEPS, min(MAX_SCROLL_STEPS, previous + steps))
+                    self.pending[-1] = ("scroll", (merged, x, y, interval_ms))
+                    return
+            self.pending.append(("scroll", (steps, x, y, interval_ms)))
+            self.condition.notify_all()
 
     def flush(self, timeout=2):
         """Wait for pending input to be acknowledged. Keep this off the GUI thread."""
@@ -363,6 +407,16 @@ dpkg -i "$pkg"
     raise RuntimeError(f"Installed package, but its service did not start. {output.strip()}")
 
 
+def scroll_once(ssh, values):
+    if len(values) not in (1, 3, 4):
+        raise ValueError("Expected scroll STEPS [X Y [INTERVAL_MS]].")
+    steps = int(values[0])
+    x, y = map(float, values[1:3]) if len(values) >= 3 else (0.5, 0.5)
+    interval_ms = int(values[3]) if len(values) == 4 else DEFAULT_SCROLL_INTERVAL_MS
+    validate_scroll(steps, x, y, interval_ms)
+    phone_call(ssh, PHONE_COMMAND + " " + scroll_words(steps, x, y, interval_ms))
+
+
 def shell(ssh, device, args):
     interactive = sys.stdin.isatty()
     while True:
@@ -374,7 +428,11 @@ def shell(ssh, device, args):
         if not line.strip():
             continue
         try:
-            gesture(ssh, device, args, parse_action(shlex.split(line), args.size))
+            tokens = shlex.split(line)
+            if tokens[0] == "scroll":
+                scroll_once(ssh, tokens[1:])
+            else:
+                gesture(ssh, device, args, parse_action(tokens, args.size))
         except (RuntimeError, ValueError) as error:
             if not interactive:
                 raise
@@ -407,6 +465,10 @@ def main():
     for coordinate in ("x1", "y1", "x2", "y2"):
         swipe.add_argument(coordinate)
     swipe.add_argument("ms", nargs="?", default="350")
+    scroll = sub.add_parser("scroll", help="Scroll vertically. Positive steps go up, negative go down.")
+    scroll.add_argument("steps", type=int)
+    scroll.add_argument("position", nargs="*", metavar="VALUE",
+                        help="Optional X Y anchor (normalized upright coordinates), then INTERVAL_MS.")
     sub.add_parser("shell", help="Read one gesture per line over a single SSH connection.")
     installer = sub.add_parser("install")
     installer.add_argument("package", nargs="?", type=Path, default=DEFAULT_PACKAGE)
@@ -430,6 +492,8 @@ def main():
                 shell(ssh, device, args)
             elif args.command == "orientation":
                 print(ssh_orientation(ssh))
+            elif args.command == "scroll":
+                scroll_once(ssh, [args.steps, *args.position])
             else:
                 gesture(ssh, device, args, action)
     except KeyboardInterrupt:

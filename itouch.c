@@ -51,10 +51,15 @@ enum {
     DIGITIZER_IDENTITY = 1 << 5,
     DIGITIZER_DISPLAY_INTEGRATED = (11 << 16) + 25,
     SWIPE_SAMPLES_PER_SECOND = 120,
+    MAX_SCROLL_STEPS = 8,
+    MIN_SCROLL_INTERVAL_MS = 20,
+    MAX_SCROLL_INTERVAL_MS = 200,
+    DEFAULT_SCROLL_INTERVAL_MS = 160,
     TOUCH_TIMEOUT_MS = 3000,
     COMMAND_SIZE = 256
 };
 enum phase { DOWN, MOVE, UP };
+enum touch_path { STATIONARY, LINEAR, SMOOTH };
 
 static const struct sockaddr_un address = {
     .sun_family = AF_UNIX,
@@ -103,13 +108,13 @@ static int touch(enum phase phase, double x, double y)
     return 0;
 }
 
-static int gesture(double x, double y, double end_x, double end_y, int ms, int swipe)
+static int gesture(double x, double y, double end_x, double end_y, int ms, enum touch_path path)
 {
     uint64_t duration = ticks(ms);
     uint64_t start = mach_absolute_time();
     if (touch(DOWN, x, y))
         return -1;
-    int intervals = swipe ? (ms * SWIPE_SAMPLES_PER_SECOND + 999) / 1000 : 1;
+    int intervals = path == STATIONARY ? 1 : (ms * SWIPE_SAMPLES_PER_SECOND + 999) / 1000;
     int failed = 0;
     double last_x = x;
     double last_y = y;
@@ -129,6 +134,8 @@ static int gesture(double x, double y, double end_x, double end_y, int ms, int s
 
         // The last movement reaches the endpoint before the separate lift event.
         double t = (double)step / (intervals - 1);
+        if (path == SMOOTH)
+            t = t * t * (3 - 2 * t);
         double next_x = x + t * (end_x - x);
         double next_y = y + t * (end_y - y);
         if (touch(MOVE, next_x, next_y)) {
@@ -151,9 +158,71 @@ static int coordinate(const char *word, double *value)
     return end != word && !*end && isfinite(*value) && *value >= 0 && *value <= 1;
 }
 
+static int current_orientation(void)
+{
+    uint32_t port = SBSSpringBoardServerPort();
+    int orientation = 0;
+    if (!port || SBGetInterfaceOrientation(port, &orientation) || orientation < 1 || orientation > 4)
+        return 0;
+    return orientation;
+}
+
+static const char *scroll_gesture(const char *steps_word, const char *x_word,
+                                  const char *y_word, const char *interval_word,
+                                  int touch_held)
+{
+    if (touch_held)
+        return "ERR a live touch is in progress\n";
+    if (!steps_word || (x_word && !y_word))
+        return "ERR expected scroll STEPS [X Y [INTERVAL_MS]]\n";
+    char *end;
+    long steps = strtol(steps_word, &end, 10);
+    if (*end || !steps || steps < -MAX_SCROLL_STEPS || steps > MAX_SCROLL_STEPS)
+        return "ERR scroll steps must be a nonzero integer from -8 to 8\n";
+    double x = 0.5, y = 0.5;
+    if (x_word && (!coordinate(x_word, &x) || !coordinate(y_word, &y)))
+        return "ERR scroll coordinates must be numbers from 0 to 1\n";
+    long interval = DEFAULT_SCROLL_INTERVAL_MS;
+    if (interval_word) {
+        interval = strtol(interval_word, &end, 10);
+        if (*end || interval < MIN_SCROLL_INTERVAL_MS || interval > MAX_SCROLL_INTERVAL_MS)
+            return "ERR scroll interval must be an integer from 20 to 200 ms\n";
+    }
+    int orientation = current_orientation();
+    if (!orientation)
+        return "ERR could not read interface orientation\n";
+
+    // Keep the swipe inside the display so it doesn't start a system edge gesture.
+    double pace = (double)(MAX_SCROLL_INTERVAL_MS - interval) /
+        (MAX_SCROLL_INTERVAL_MS - MIN_SCROLL_INTERVAL_MS);
+    double distance = fmin(0.65, (0.105 + 0.085 * pace) * labs(steps));
+    double low = fmax(0.10, fmin(y - (steps < 0 ? distance : 0), 0.90 - distance));
+    double high = low + distance;
+    double start_y = steps > 0 ? low : high;
+    double end_y = steps > 0 ? high : low;
+    x = fmax(0.04, fmin(x, 0.96));
+    int duration = (int)(105 - 55 * pace + 8 * fmin(3, labs(steps) - 1));
+    int failed;
+    switch (orientation) {
+    case 1:
+        failed = gesture(x, start_y, x, end_y, duration, SMOOTH);
+        break;
+    case 2:
+        failed = gesture(1 - x, 1 - start_y, 1 - x, 1 - end_y, duration, SMOOTH);
+        break;
+    case 3:
+        failed = gesture(1 - start_y, x, 1 - end_y, x, duration, SMOOTH);
+        break;
+    default:
+        failed = gesture(start_y, 1 - x, end_y, 1 - x, duration, SMOOTH);
+        break;
+    }
+    return failed ? "ERR scroll touch event failed\n" : "OK\n";
+}
+
 static const char *command(char *line, int touch_held)
 {
-    const char *invalid = "ERR expected ping, tap X Y, hold X Y MS, or swipe X1 Y1 X2 Y2 MS\n";
+    const char *invalid = "ERR expected ping, tap X Y, hold X Y MS, swipe X1 Y1 X2 Y2 MS, or scroll STEPS [X Y [INTERVAL_MS]]\n";
     char *words[6];
     char *cursor = NULL;
     int count = 0;
@@ -167,6 +236,13 @@ static const char *command(char *line, int touch_held)
         return invalid;
     if (count == 1 && !strcmp(words[0], "ping"))
         return "OK iTouch/1\n";
+    if (!strcmp(words[0], "scroll")) {
+        if (count == 2)
+            return scroll_gesture(words[1], NULL, NULL, NULL, touch_held);
+        if (count == 4 || count == 5)
+            return scroll_gesture(words[1], words[2], words[3], count == 5 ? words[4] : NULL, touch_held);
+        return "ERR expected scroll STEPS [X Y [INTERVAL_MS]]\n";
+    }
     int tap = count == 3 && !strcmp(words[0], "tap");
     int hold = count == 4 && !strcmp(words[0], "hold");
     int swipe = count == 6 && !strcmp(words[0], "swipe");
@@ -186,7 +262,7 @@ static const char *command(char *line, int touch_held)
         if (*end || duration < 30 || duration > 5000)
             return "ERR duration must be an integer from 30 to 5000 ms\n";
     }
-    if (gesture(points[0], points[1], points[2], points[3], (int)duration, swipe))
+    if (gesture(points[0], points[1], points[2], points[3], (int)duration, swipe ? LINEAR : STATIONARY))
         return "ERR touch event failed\n";
     return "OK\n";
 }
@@ -246,6 +322,8 @@ static const char *live_command(struct live_touch *input, char *line)
     }
     if (!strcmp(line, "up"))
         return lift(input) ? "ERR could not lift touch\n" : "OK\n";
+    if (!strncmp(line, "scroll ", 7))
+        return command(line, input->held);
 
     char *cursor = NULL;
     const char *name = strtok_r(line, " \t\r", &cursor);
@@ -466,16 +544,9 @@ static int request(const char *line)
 
 static int interface_orientation(void)
 {
-    uint32_t port = SBSSpringBoardServerPort();
-    if (!port) {
-        fputs("Could not connect to SpringBoard\n", stderr);
-        return 1;
-    }
-    int orientation = 0;
-    int error = SBGetInterfaceOrientation(port, &orientation);
-    if (error || orientation < 1 || orientation > 4) {
-        fprintf(stderr, "Could not read interface orientation (status %d, value %d)\n",
-                error, orientation);
+    int orientation = current_orientation();
+    if (!orientation) {
+        fputs("Could not read interface orientation\n", stderr);
         return 1;
     }
     printf("%d\n", orientation);
@@ -542,7 +613,7 @@ int main(int argc, char **argv)
         line[used++] = i == argc - 1 ? '\n' : ' ';
     }
     if (!used) {
-        fputs("Usage: itouch ping|orientation|tap|hold|swipe|stream\n", stderr);
+        fputs("Usage: itouch ping|orientation|tap|hold|swipe|scroll|stream\n", stderr);
         return 1;
     }
     line[used] = '\0';
