@@ -32,13 +32,31 @@ python .\itouch.py --size 2208x1242 swipe 1750 950 530 950 430
 
 Windows 的 USB 模式需要 Apple Mobile Device Service，例如通过 iTunes 安装。电脑端依赖可通过 `python -m pip install paramiko pymobiledevice3` 安装。已有离线依赖时，可用 `--tools <目录>` 指定包含 `ios-python` 和 `ssh-python` 的工具目录。USB 默认连接手机的 SSH 端口 `2222`，启用了端口 22 的设备可用 `--port 22`。连着多台设备时可用 `--udid <设备序列号>` 选择。
 
-也可以通过 Wi-Fi SSH 连接。把示例 IP 换成手机的 Wi-Fi 地址，按手机实际监听端口设置 `--port`，发送动作时指定当前屏幕方向。
+也可以通过 Wi-Fi SSH 连接。把示例 IP 换成手机的 Wi-Fi 地址，按手机实际监听端口设置 `--port`。从 iTouch 1.1.1 起，Wi-Fi 模式默认通过 SSH 查询手机当前的界面方向。需要固定方向时可传入 `--orientation`。
 
 ```powershell
-python .\itouch.py --host 192.0.2.10 --port 2222 --orientation portrait tap 0.5 0.5
+python .\itouch.py --host 192.0.2.10 --port 2222 tap 0.5 0.5
 ```
 
 使用已有的 SSH 终端时，可以直接运行 `/usr/local/bin/itouch ping`、`/usr/local/bin/itouch tap X Y`、`/usr/local/bin/itouch hold X Y MS` 或 `/usr/local/bin/itouch swipe X1 Y1 X2 Y2 MS`。这些命令使用手机原生竖屏的归一化坐标。电脑端 Python 客户端会自动完成方向换算和截图像素换算。
+
+## 查询界面方向
+
+```powershell
+ssh -p 2222 root@192.0.2.10 itouch orientation
+python .\itouch.py --host 192.0.2.10 --port 2222 orientation
+```
+
+成功时只输出一行数字。查询失败时返回非零退出码。方向由 SpringBoard 提供，跟随当前界面。
+
+| 返回值 | 方向 |
+|---|---|
+| `1` | 竖屏 |
+| `2` | 倒竖屏 |
+| `3` | 横屏，主屏键在右 |
+| `4` | 横屏，主屏键在左 |
+
+Python 可在同一条已认证 SSH 连接上调用 `itouch.ssh_orientation(ssh)` 拿到整数，供 `native_point(x, y, orientation)` 使用。
 
 ## 实时拖动接口
 
@@ -67,7 +85,7 @@ python .\itouch.py install
 python .\itouch.py uninstall
 ```
 
-`install` 通过 USB SSH 上传 `dist\com.itouch.remote_1.1.0_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
+`install` 通过 SSH 上传 `dist\com.itouch.remote_1.1.1_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。Wi-Fi 安装时在 `install` 前加 `--host` 和手机 IP。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
 
 手机端服务由 `launchd` 管理，日志在 `/var/log/itouch.log`。若设备重启后需要重新激活越狱，激活后先运行 `ping`。若 SSH 正常但服务未加载，可以通过手机 SSH 执行 `launchctl load /Library/LaunchDaemons/com.itouch.remote.plist`。
 
@@ -81,4 +99,4 @@ iOS 10 的触控事件由 IOKit 的 IOHID 接口提交给系统，再交给当�
 python .\build.py --clang <clang路径> --lld <ld64.lld路径> --llvm-nm <llvm-nm路径> --headers <any-darwin-any路径> --signer <rcodesign路径>
 ```
 
-输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.1.0_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。
+输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.1.1_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。

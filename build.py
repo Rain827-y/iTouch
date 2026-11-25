@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PACKAGE = "com.itouch.remote"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 ARCHITECTURE = "iphoneos-arm"
 
 
@@ -18,10 +18,15 @@ def archive(files):
         for name, mode, data in files:
             entry = tarfile.TarInfo("./" + name)
             entry.mode = mode
-            entry.size = len(data)
             entry.uname = "root"
             entry.gname = "wheel"
-            tar.addfile(entry, io.BytesIO(data))
+            if isinstance(data, str):
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = data
+                tar.addfile(entry)
+            else:
+                entry.size = len(data)
+                tar.addfile(entry, io.BytesIO(data))
     return gzip.compress(output.getvalue(), mtime=0)
 
 
@@ -43,6 +48,7 @@ def package(executable):
     ]
     payload = archive([
         ("usr/local/bin/itouch", 0o755, executable),
+        ("usr/bin/itouch", 0o777, "../local/bin/itouch"),
         ("Library/LaunchDaemons/" + PACKAGE + ".plist", 0o644,
          (ROOT / (PACKAGE + ".plist")).read_bytes()),
     ])
@@ -98,7 +104,8 @@ def main():
         ).split())
         hid = {symbol for symbol in undefined if symbol.startswith("_IOHID")}
         cf = {"_CFRelease"}
-        system = (undefined - hid - cf) | {"dyld_stub_binder"}
+        springboard = {"_SBSSpringBoardServerPort", "_SBGetInterfaceOrientation"}
+        system = (undefined - hid - cf - springboard) | {"dyld_stub_binder"}
         signed = work / "itouch"
         linker = [args.lld]
         if Path(args.lld).name.lower() in {"lld", "lld.exe", "ld.lld", "ld.lld.exe"}:
@@ -109,6 +116,7 @@ def main():
             str(stub(work, "libSystem.tbd", "/usr/lib/libSystem.B.dylib", system)),
             str(stub(work, "IOKit.tbd", "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit", hid)),
             str(stub(work, "CoreFoundation.tbd", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", cf)),
+            str(stub(work, "SpringBoardServices.tbd", "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", springboard)),
         ], check=True)
         subprocess.run([
             args.signer, "sign", "--digest", "sha1", "--timestamp-url", "none",
