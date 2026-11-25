@@ -40,6 +40,26 @@ python .\itouch.py --host 192.0.2.10 --port 2222 --orientation portrait tap 0.5 
 
 使用已有的 SSH 终端时，可以直接运行 `/usr/local/bin/itouch ping`、`/usr/local/bin/itouch tap X Y`、`/usr/local/bin/itouch hold X Y MS` 或 `/usr/local/bin/itouch swipe X1 Y1 X2 Y2 MS`。这些命令使用手机原生竖屏的归一化坐标。电脑端 Python 客户端会自动完成方向换算和截图像素换算。
 
+## 实时拖动接口
+
+iTouch 1.1.0 提供 `itouch.TouchStream(ssh)`，其中 `ssh` 是 `itouch.connect(args)` 返回的已认证 SSH 连接。保持该连接和流会话打开，用 `down(x, y)`、`move(x, y)`、`up()` 分别处理鼠标左键按下、拖动和松开。连接和握手可以在后台线程完成。输入方法只排队，由后台线程收发确认。连续排队的移动点会合并到最新位置，按下和抬起会保留顺序。
+
+```python
+from itouch import TouchStream, native_point
+
+with TouchStream(ssh) as touch:
+    # 下面三行分别放进 GUI 的按下、拖动和松开回调。
+    touch.down(*native_point(x0, y0, orientation))
+    touch.move(*native_point(x1, y1, orientation))
+    touch.up()
+    # 仅用于命令行测试或后台线程同步，GUI 的鼠标回调无需调用。
+    touch.flush()
+```
+
+`x0, y0` 和 `x1, y1` 是相对画面内容区域的归一化坐标。界面方向值与 `usb_orientation(device)` 相同。鼠标停住时暂停发送移动点即可，Python 客户端会自动维持按住。松开后，App 可按自己的规则执行翻页吸附或惯性滚动。窗口失焦、捕获丢失或界面旋转时可调用 `up()` 结束当前手势。退出流会话或掉线时，手机会释放触点。
+
+其他语言可通过 SSH 执行 `/usr/local/bin/itouch stream`，保持标准输入和输出打开。握手返回 `OK stream/1`。后续每行发送一条 `down X Y`、`move X Y`、`up` 或 `ping`，每条成功命令返回一行 `OK`，错误返回 `ERR …` 并结束流。坐标是手机原生竖屏的 0 到 1。按住且没有移动时，每秒发一次 `ping`，手机在最后一条有效指令后 3 秒自动抬起并关闭流。
+
 ## 安装与卸载
 
 ```powershell
@@ -47,7 +67,7 @@ python .\itouch.py install
 python .\itouch.py uninstall
 ```
 
-`install` 通过 USB SSH 上传 `dist\com.itouch.remote_1.0.1_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
+`install` 通过 USB SSH 上传 `dist\com.itouch.remote_1.1.0_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
 
 手机端服务由 `launchd` 管理，日志在 `/var/log/itouch.log`。若设备重启后需要重新激活越狱，激活后先运行 `ping`。若 SSH 正常但服务未加载，可以通过手机 SSH 执行 `launchctl load /Library/LaunchDaemons/com.itouch.remote.plist`。
 
@@ -61,4 +81,4 @@ iOS 10 的触控事件由 IOKit 的 IOHID 接口提交给系统，再交给当�
 python .\build.py --clang <clang路径> --lld <ld64.lld路径> --llvm-nm <llvm-nm路径> --headers <any-darwin-any路径> --signer <rcodesign路径>
 ```
 
-输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.0.1_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。
+输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.1.0_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。

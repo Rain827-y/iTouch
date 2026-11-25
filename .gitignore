@@ -1,3 +1,4 @@
 __pycache__/
 /dist/*
 !/dist/com.itouch.remote_1.0.1_iphoneos-arm.deb
+!/dist/com.itouch.remote_1.1.0_iphoneos-arm.deb

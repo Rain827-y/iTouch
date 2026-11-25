@@ -3,18 +3,21 @@ import asyncio
 import base64
 import getpass
 import hashlib
+import math
 import os
 import re
 import shlex
 import socket
 import sys
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PHONE_COMMAND = "/usr/local/bin/itouch"
-DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.0.1_iphoneos-arm.deb"
+DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.1.0_iphoneos-arm.deb"
 DEFAULT_TOOLS = (ROOT / "../../Games/ios/Clutch/_tools").resolve()
 ORIENTATIONS = {
     "portrait": 1,
@@ -173,6 +176,135 @@ def parse_action(tokens, dimensions):
     return action, points, duration
 
 
+def native_point(x, y, orientation):
+    """Convert upright display coordinates to the digitizer's portrait axes."""
+    return ((x, y), (1 - x, 1 - y), (1 - y, x), (y, 1 - x))[orientation - 1]
+
+
+class TouchStream:
+    """One live finger over SSH, with queued events and a held-touch heartbeat."""
+
+    def __init__(self, ssh):
+        self.ssh = ssh
+        self.condition = threading.Condition()
+        self.pending = deque()
+        self.pressed = False
+        self.sending = False
+        self.closed = False
+        self.error = None
+        self.channel = None
+
+    @staticmethod
+    def reply(reader, expected):
+        response = reader.readline(256).decode("utf-8", errors="replace").strip()
+        if response != expected:
+            raise RuntimeError(response or "The iTouch stream closed.")
+
+    def __enter__(self):
+        self.channel = self.ssh.open_session(timeout=10)
+        try:
+            self.channel.settimeout(8)
+            self.channel.set_combine_stderr(True)
+            self.channel.exec_command(PHONE_COMMAND + " stream")
+            self.reader = self.channel.makefile("rb")
+            self.reply(self.reader, "OK stream/1")
+            self.thread = threading.Thread(target=self._send, name="iTouch stream", daemon=True)
+            self.thread.start()
+        except BaseException:
+            self.channel.close()
+            raise
+        return self
+
+    def __exit__(self, *exception):
+        with self.condition:
+            self.closed = True
+            self.pending.clear()
+            self.condition.notify_all()
+        self.channel.close()
+        self.thread.join(timeout=1)
+        self.reader.close()
+
+    def _send(self):
+        held = False
+        try:
+            while True:
+                with self.condition:
+                    got_work = self.condition.wait_for(
+                        lambda: self.pending or self.closed, timeout=0.75)
+                    if self.closed:
+                        return
+                    if self.channel.closed:
+                        raise RuntimeError("The iTouch stream closed.")
+                    if got_work:
+                        name, line = self.pending.popleft()
+                    elif held:
+                        name, line = "ping", b"ping\n"
+                    else:
+                        continue
+                    self.sending = True
+                self.channel.sendall(line)
+                self.reply(self.reader, "OK")
+                if name in ("down", "up"):
+                    held = name == "down"
+                with self.condition:
+                    self.sending = False
+                    self.condition.notify_all()
+        except Exception as error:
+            self.channel.close()
+            with self.condition:
+                self.error = error
+                self.condition.notify_all()
+
+    def _check(self):
+        if self.error is not None:
+            raise RuntimeError(f"iTouch stream: {self.error}") from self.error
+        if self.closed or self.channel is None or self.channel.closed:
+            raise RuntimeError("The iTouch stream is closed.")
+
+    def _enqueue(self, name, x=None, y=None):
+        with self.condition:
+            self._check()
+            if name == "up" and not self.pressed:
+                return
+            if (name == "down") == self.pressed:
+                raise ValueError("A touch is already down." if self.pressed else "Call down first.")
+            if name in ("down", "move"):
+                if not all(math.isfinite(v) and 0 <= v <= 1 for v in (x, y)):
+                    raise ValueError("Live touch coordinates must be between 0 and 1.")
+                line = f"{name} {x:.9f} {y:.9f}\n".encode("ascii")
+            else:
+                line = b"up\n"
+            if name == "move" and self.pending and self.pending[-1][0] == "move":
+                self.pending[-1] = (name, line)
+            else:
+                self.pending.append((name, line))
+            if name != "move":
+                self.pressed = name == "down"
+            self.condition.notify_all()
+
+    def down(self, x, y):
+        """Press at normalized native portrait coordinates."""
+        self._enqueue("down", x, y)
+
+    def move(self, x, y):
+        """Move at the latest supplied coordinates while staying pressed."""
+        self._enqueue("move", x, y)
+
+    def up(self):
+        """Lift at the last position."""
+        self._enqueue("up")
+
+    def flush(self, timeout=2):
+        """Wait for pending input to be acknowledged. Keep this off the GUI thread."""
+        with self.condition:
+            done = self.condition.wait_for(
+                lambda: self.error is not None or self.closed
+                or (not self.pending and not self.sending), timeout=timeout)
+            self._check()
+            if not done:
+                raise TimeoutError("Timed out waiting for the iTouch stream.")
+
+
 def gesture(ssh, device, args, action):
     name, points, duration = action
     if points:
@@ -191,8 +323,7 @@ def gesture(ssh, device, args, action):
                 raise ValueError("The current screen orientation does not match --size.")
     wire = [PHONE_COMMAND, name]
     for x, y in points:
-        # Convert upright screenshot coordinates to the digitizer's portrait axes.
-        native = ((x, y), (1 - x, 1 - y), (1 - y, x), (y, 1 - x))[orientation - 1]
+        native = native_point(x, y, orientation)
         wire.extend(f"{coordinate:.9f}" for coordinate in native)
     if duration is not None:
         wire.append(str(duration))
