@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PACKAGE = "com.itouch.remote"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 ARCHITECTURE = "iphoneos-arm"
 
 
