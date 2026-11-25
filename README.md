@@ -93,7 +93,7 @@ with TouchStream(ssh) as touch:
 
 iTouch 1.2.0 在同一个 `TouchStream` 上提供 `touch.scroll(steps, x=0.5, y=0.5)`。把每次鼠标滚轮事件的格数传进来。正数向上浏览，负数向下浏览，每次可传 1 到 8 格。可选的 `x`、`y` 是鼠标在正向显示画面中的归一化位置，范围为 0 到 1，手机会根据当前界面方向换算。先松开左键拖动，再发送滚轮事件。
 
-iTouch 1.3.0 起可选 `mode="drag"` 跟手模式。同一个 SSH 实时会话中，连续滚轮事件会移动同一个触点。1.3.1 对长距离移动限速，并在停滚后补发低速触控点。最后一段移动结束约 230 毫秒后，手机在原定终点抬起，以减少 App 的惯性滚动。触点到达可移动区域边缘后会重新落点。默认 `mode="flick"` 为短滑模式，每次移动后立即抬起。
+iTouch 1.3.0 起可选 `mode="drag"` 跟手模式。同一个 SSH 实时会话中，连续滚轮事件会移动同一个触点。长距离移动有速度上限。1.3.2 在停滚后沿原方向完成最后一小段，再在原定终点抬起，整个收尾约 230 毫秒。触点到达可移动区域边缘后会重新落点。默认 `mode="flick"` 为短滑模式，每次移动后立即抬起。
 
 ```python
 # 放在 GUI 的滚轮回调中。WheelDelta 为 120 时代表向上一格。
@@ -118,7 +118,7 @@ python .\itouch.py install
 python .\itouch.py uninstall
 ```
 
-`install` 通过 SSH 上传 `dist\com.itouch.remote_1.3.1_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。Wi-Fi 安装时在 `install` 前加 `--host` 和手机 IP。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
+`install` 通过 SSH 上传 `dist\com.itouch.remote_1.3.2_iphoneos-arm.deb`，执行 `dpkg -i` 并检查服务是否启动。Wi-Fi 安装时在 `install` 前加 `--host` 和手机 IP。已有 SSH 会话也可以把包上传后在手机上运行 `dpkg -i <包路径>`。包内程序是 arm64 Mach-O，`iphoneos-arm` 是这台手机上 dpkg 使用的包架构名。
 
 手机端服务由 `launchd` 管理，日志在 `/var/log/itouch.log`。若设备重启后需要重新激活越狱，激活后先运行 `ping`。若 SSH 正常但服务未加载，可以通过手机 SSH 执行 `launchctl load /Library/LaunchDaemons/com.itouch.remote.plist`。
 
@@ -132,4 +132,4 @@ iOS 10 的触控事件由 IOKit 的 IOHID 接口提交给系统，再交给当�
 python .\build.py --clang <clang路径> --lld <ld64.lld路径> --llvm-nm <llvm-nm路径> --headers <any-darwin-any路径> --signer <rcodesign路径>
 ```
 
-输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.3.1_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。
+输出为 `dist\itouch` 和 `dist\com.itouch.remote_1.3.2_iphoneos-arm.deb`。IOHID 事件字段和提交方式可对照 [SimulateTouch](https://github.com/iolate/SimulateTouch)。

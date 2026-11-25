@@ -62,14 +62,14 @@ enum {
     MAX_SCROLL_INTERVAL_MS = 200,
     DEFAULT_SCROLL_INTERVAL_MS = 160,
     WHEEL_IDLE_MS = 85,
-    WHEEL_BRAKE_SAMPLE_MS = 48,
+    WHEEL_STOP_SAMPLE_MS = 48,
     TOUCH_TIMEOUT_MS = 3000,
     COMMAND_SIZE = 256
 };
 enum phase { DOWN, MOVE, UP };
 enum touch_path { STATIONARY, LINEAR, SMOOTH };
 enum contact_kind { NO_CONTACT, POINTER_CONTACT, WHEEL_CONTACT };
-enum wheel_stop_phase { WHEEL_BRAKE, WHEEL_RETURN, WHEEL_STILL, WHEEL_LIFT };
+enum wheel_stop_phase { WHEEL_APPROACH, WHEEL_FINISH, WHEEL_STILL, WHEEL_LIFT };
 
 static const struct sockaddr_un address = {
     .sun_family = AF_UNIX,
@@ -87,7 +87,7 @@ struct live_touch {
     double wheel_x;
     double wheel_y;
     int wheel_orientation;
-    double wheel_brake_offset;
+    double wheel_tail;
     enum wheel_stop_phase wheel_stop;
 };
 
@@ -244,19 +244,19 @@ static int advance_wheel_stop(struct live_touch *input)
     if (input->wheel_stop == WHEEL_LIFT)
         return lift(input);
 
-    // Deliver low-velocity samples before lifting. A sleeping synthetic finger
-    // alone may leave UIKit with the velocity of the previous movement.
+    // Finish the reserved tail in the original direction, then send a still
+    // sample so UIKit receives a near-zero velocity before the lift.
     double x = input->wheel_x;
     double y = input->wheel_y;
-    if (input->wheel_stop == WHEEL_BRAKE)
-        y = fmax(0.10, fmin(y + input->wheel_brake_offset, 0.90));
+    if (input->wheel_stop == WHEEL_APPROACH)
+        y -= input->wheel_tail / 2;
     native_point(input->wheel_orientation, &x, &y);
     if (touch(MOVE, x, y))
         return -1;
     input->x = x;
     input->y = y;
     input->wheel_stop++;
-    input->deadline = mach_absolute_time() + ticks(WHEEL_BRAKE_SAMPLE_MS);
+    input->deadline = mach_absolute_time() + ticks(WHEEL_STOP_SAMPLE_MS);
     return 0;
 }
 
@@ -306,14 +306,15 @@ static int wheel_drag(struct live_touch *input, int orientation, double x, doubl
         double distance = end_y - input->wheel_y;
         // Cap the speed of long merged moves without slowing individual detents.
         int travel_ms = (int)fmax(fmax(25, duration * fabs(distance / delta)), fabs(distance) * 280);
+        double tail = copysign(fmin(0.003, fabs(distance) / 4), distance);
         double end_x = input->wheel_x;
-        double native_y = end_y;
+        double native_y = end_y - tail;
         native_point(orientation, &end_x, &native_y);
         if (move_touch(input, end_x, native_y, travel_ms, SMOOTH))
             return -1;
         input->wheel_y = end_y;
-        input->wheel_brake_offset = -copysign(0.003, distance);
-        input->wheel_stop = WHEEL_BRAKE;
+        input->wheel_tail = tail;
+        input->wheel_stop = WHEEL_APPROACH;
         input->deadline = mach_absolute_time() + ticks(WHEEL_IDLE_MS);
         delta -= distance;
     }
