@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PHONE_COMMAND = "/usr/local/bin/itouch"
-DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.1.0_iphoneos-arm.deb"
+DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.1.1_iphoneos-arm.deb"
 DEFAULT_TOOLS = (ROOT / "../../Games/ios/Clutch/_tools").resolve()
 ORIENTATIONS = {
     "portrait": 1,
@@ -140,6 +140,17 @@ def phone_call(ssh, command, data=None):
         raise RuntimeError(output.strip() or f"Phone command exited with status {status}.")
     if output:
         print(output, end="", flush=True)
+
+
+def ssh_orientation(ssh):
+    """Read the current iOS interface orientation over an authenticated SSH connection."""
+    status, output = run_remote(ssh, PHONE_COMMAND + " orientation")
+    value = output.strip()
+    if status or value not in {"1", "2", "3", "4"}:
+        raise RuntimeError(f"Could not read interface orientation over SSH: "
+                           f"{value or f'exit status {status}'}. "
+                           "For automatic orientation over Wi-Fi, install iTouch 1.1.1 or later.")
+    return int(value)
 
 
 def size(value):
@@ -310,12 +321,13 @@ def gesture(ssh, device, args, action):
     if points:
         if args.orientation == "auto":
             if device is None:
-                raise ValueError("With --host, choose a fixed --orientation.")
-            try:
-                orientation = asyncio.run(asyncio.wait_for(usb_orientation(device), 12))
-            except Exception as error:
-                raise RuntimeError(f"Could not read screen orientation: {error}. "
-                                   "Unlock and trust the phone, or set --orientation.") from error
+                orientation = ssh_orientation(ssh)
+            else:
+                try:
+                    orientation = asyncio.run(asyncio.wait_for(usb_orientation(device), 12))
+                except Exception as error:
+                    raise RuntimeError(f"Could not read screen orientation: {error}. "
+                                       "Unlock and trust the phone, or set --orientation.") from error
         else:
             orientation = ORIENTATIONS[args.orientation]
         if args.size and args.size[0] != args.size[1]:
@@ -384,6 +396,7 @@ def main():
     parser.add_argument("--size", type=size, help="Use screenshot pixels at WIDTHxHEIGHT.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("ping")
+    sub.add_parser("orientation", help="Read the phone's interface orientation over SSH.")
     tap = sub.add_parser("tap")
     hold = sub.add_parser("hold")
     for command in (tap, hold):
@@ -415,6 +428,8 @@ def main():
                 phone_call(ssh, "dpkg -P com.itouch.remote")
             elif args.command == "shell":
                 shell(ssh, device, args)
+            elif args.command == "orientation":
+                print(ssh_orientation(ssh))
             else:
                 gesture(ssh, device, args, action)
     except KeyboardInterrupt:

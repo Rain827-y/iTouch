@@ -33,6 +33,8 @@ extern void IOHIDEventAppendEvent(HIDEvent parent, HIDEvent child);
 extern void IOHIDEventSetIntegerValue(HIDEvent event, uint32_t field, int value);
 extern void IOHIDEventSetSenderID(HIDEvent event, uint64_t sender);
 extern void CFRelease(const void *object);
+extern uint32_t SBSSpringBoardServerPort(void);
+extern int SBGetInterfaceOrientation(uint32_t port, int *orientation);
 struct mach_timebase_info {
     uint32_t numer;
     uint32_t denom;
@@ -462,6 +464,24 @@ static int request(const char *line)
     return result;
 }
 
+static int interface_orientation(void)
+{
+    uint32_t port = SBSSpringBoardServerPort();
+    if (!port) {
+        fputs("Could not connect to SpringBoard\n", stderr);
+        return 1;
+    }
+    int orientation = 0;
+    int error = SBGetInterfaceOrientation(port, &orientation);
+    if (error || orientation < 1 || orientation > 4) {
+        fprintf(stderr, "Could not read interface orientation (status %d, value %d)\n",
+                error, orientation);
+        return 1;
+    }
+    printf("%d\n", orientation);
+    return 0;
+}
+
 static int stream(void)
 {
     int peer = connect_peer();
@@ -505,6 +525,8 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     if (argc == 2 && !strcmp(argv[1], "serve"))
         return serve();
+    if (argc == 2 && !strcmp(argv[1], "orientation"))
+        return interface_orientation();
     if (argc == 2 && !strcmp(argv[1], "stream"))
         return stream();
     char line[COMMAND_SIZE];
@@ -520,7 +542,7 @@ int main(int argc, char **argv)
         line[used++] = i == argc - 1 ? '\n' : ' ';
     }
     if (!used) {
-        fputs("Usage: itouch ping|tap|hold|swipe|stream\n", stderr);
+        fputs("Usage: itouch ping|orientation|tap|hold|swipe|stream\n", stderr);
         return 1;
     }
     line[used] = '\0';
