@@ -61,13 +61,15 @@ enum {
     MIN_SCROLL_INTERVAL_MS = 20,
     MAX_SCROLL_INTERVAL_MS = 200,
     DEFAULT_SCROLL_INTERVAL_MS = 160,
-    WHEEL_SETTLE_MS = 140,
+    WHEEL_IDLE_MS = 85,
+    WHEEL_BRAKE_SAMPLE_MS = 48,
     TOUCH_TIMEOUT_MS = 3000,
     COMMAND_SIZE = 256
 };
 enum phase { DOWN, MOVE, UP };
 enum touch_path { STATIONARY, LINEAR, SMOOTH };
 enum contact_kind { NO_CONTACT, POINTER_CONTACT, WHEEL_CONTACT };
+enum wheel_stop_phase { WHEEL_BRAKE, WHEEL_RETURN, WHEEL_STILL, WHEEL_LIFT };
 
 static const struct sockaddr_un address = {
     .sun_family = AF_UNIX,
@@ -85,6 +87,8 @@ struct live_touch {
     double wheel_x;
     double wheel_y;
     int wheel_orientation;
+    double wheel_brake_offset;
+    enum wheel_stop_phase wheel_stop;
 };
 
 static uint64_t ticks(int ms)
@@ -235,13 +239,36 @@ static void native_point(int orientation, double *x, double *y)
     }
 }
 
+static int advance_wheel_stop(struct live_touch *input)
+{
+    if (input->wheel_stop == WHEEL_LIFT)
+        return lift(input);
+
+    // Deliver low-velocity samples before lifting. A sleeping synthetic finger
+    // alone may leave UIKit with the velocity of the previous movement.
+    double x = input->wheel_x;
+    double y = input->wheel_y;
+    if (input->wheel_stop == WHEEL_BRAKE)
+        y = fmax(0.10, fmin(y + input->wheel_brake_offset, 0.90));
+    native_point(input->wheel_orientation, &x, &y);
+    if (touch(MOVE, x, y))
+        return -1;
+    input->x = x;
+    input->y = y;
+    input->wheel_stop++;
+    input->deadline = mach_absolute_time() + ticks(WHEEL_BRAKE_SAMPLE_MS);
+    return 0;
+}
+
 static int settle_wheel(struct live_touch *input)
 {
-    if (input->kind != WHEEL_CONTACT)
-        return 0;
-    int interrupted = !stopping && mach_wait_until(input->deadline) != 0;
-    int failed = lift(input);
-    return interrupted || failed || stopping ? -1 : 0;
+    while (input->kind == WHEEL_CONTACT) {
+        if (stopping || mach_wait_until(input->deadline) != 0 || advance_wheel_stop(input)) {
+            lift(input);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static double wheel_start(double y, double delta)
@@ -277,14 +304,17 @@ static int wheel_drag(struct live_touch *input, int orientation, double x, doubl
             end_y = fmax(0.10, fmin(start_y + delta, 0.90));
         }
         double distance = end_y - input->wheel_y;
-        int travel_ms = (int)fmax(25, duration * fabs(distance / delta));
+        // Cap the speed of long merged moves without slowing individual detents.
+        int travel_ms = (int)fmax(fmax(25, duration * fabs(distance / delta)), fabs(distance) * 280);
         double end_x = input->wheel_x;
         double native_y = end_y;
         native_point(orientation, &end_x, &native_y);
         if (move_touch(input, end_x, native_y, travel_ms, SMOOTH))
             return -1;
         input->wheel_y = end_y;
-        input->deadline = mach_absolute_time() + ticks(WHEEL_SETTLE_MS);
+        input->wheel_brake_offset = -copysign(0.003, distance);
+        input->wheel_stop = WHEEL_BRAKE;
+        input->deadline = mach_absolute_time() + ticks(WHEEL_IDLE_MS);
         delta -= distance;
     }
     return 0;
@@ -499,8 +529,10 @@ static int serve_peers(int server)
         if (input.kind != NO_CONTACT) {
             uint64_t now = mach_absolute_time();
             if (now >= input.deadline) {
-                if (input.kind == POINTER_CONTACT || lift(&input)) {
-                    send_line(sockets[1].fd, "ERR live touch timed out\n");
+                if (input.kind == POINTER_CONTACT || advance_wheel_stop(&input)) {
+                    const char *error = input.kind == POINTER_CONTACT
+                        ? "ERR live touch timed out\n" : "ERR could not stop wheel touch\n";
+                    send_line(sockets[1].fd, error);
                     end_stream(&sockets[1].fd, &input);
                 }
                 continue;
