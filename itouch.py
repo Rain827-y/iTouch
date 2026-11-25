@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PHONE_COMMAND = "/usr/local/bin/itouch"
-DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.2.0_iphoneos-arm.deb"
+DEFAULT_PACKAGE = ROOT / "dist" / "com.itouch.remote_1.2.1_iphoneos-arm.deb"
 DEFAULT_TOOLS = (ROOT / "../../Games/ios/Clutch/_tools").resolve()
 MAX_SCROLL_STEPS = 8
 MIN_SCROLL_INTERVAL_MS = 20
@@ -166,11 +166,11 @@ def size(value):
 
 def parse_action(tokens, dimensions):
     if not tokens:
-        raise ValueError("Enter ping, tap X Y, hold X Y MS, or swipe X1 Y1 X2 Y2 [MS].")
+        raise ValueError("Enter ping, home, tap X Y, hold X Y MS, or swipe X1 Y1 X2 Y2 [MS].")
     action, *values = tokens
-    lengths = {"ping": (0,), "tap": (2,), "hold": (3,), "swipe": (4, 5)}
+    lengths = {"ping": (0,), "home": (0,), "tap": (2,), "hold": (3,), "swipe": (4, 5)}
     if action not in lengths or len(values) not in lengths[action]:
-        raise ValueError("Expected ping, tap X Y, hold X Y MS, or swipe X1 Y1 X2 Y2 [MS].")
+        raise ValueError("Expected ping, home, tap X Y, hold X Y MS, or swipe X1 Y1 X2 Y2 [MS].")
     count = 4 if action == "swipe" else min(2, len(values))
     points = []
     for i in range(0, count, 2):
@@ -276,7 +276,7 @@ class TouchStream:
                 line = scroll_words(*payload) if name == "scroll" else payload
                 self.channel.sendall((line + "\n").encode("ascii"))
                 self.reply(self.reader, "OK")
-                if name in ("down", "up"):
+                if name in ("down", "up", "home"):
                     held = name == "down"
                 with self.condition:
                     self.sending = False
@@ -325,6 +325,14 @@ class TouchStream:
     def up(self):
         """Lift at the last position."""
         self._enqueue("up")
+
+    def home(self):
+        """Queue a Home button press and release any live touch."""
+        with self.condition:
+            self._check()
+            self.pending.append(("home", "home"))
+            self.pressed = False
+            self.condition.notify_all()
 
     def scroll(self, steps, x=0.5, y=0.5):
         """Queue wheel steps at upright screen coordinates, adapting to the event rate."""
@@ -455,6 +463,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("ping")
     sub.add_parser("orientation", help="Read the phone's interface orientation over SSH.")
+    sub.add_parser("home", help="Press the phone's Home button once.")
     tap = sub.add_parser("tap")
     hold = sub.add_parser("hold")
     for command in (tap, hold):
@@ -479,7 +488,7 @@ def main():
     add_dependencies(args.tools)
 
     try:
-        if args.command in ("ping", "tap", "hold", "swipe"):
+        if args.command in ("ping", "home", "tap", "hold", "swipe"):
             values = [getattr(args, name) for name in ("x", "y", "x1", "y1", "x2", "y2", "ms")
                       if hasattr(args, name)]
             action = parse_action([args.command, *values], args.size)

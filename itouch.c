@@ -29,6 +29,9 @@ extern HIDEvent IOHIDEventCreateDigitizerFingerEvent(
     const void *allocator, uint64_t timestamp, uint32_t index, uint32_t identity,
     uint32_t mask, double x, double y, double z, double pressure, double twist,
     uint8_t range, uint8_t touch, uint32_t options);
+extern HIDEvent IOHIDEventCreateKeyboardEvent(const void *allocator, uint64_t timestamp,
+                                             uint32_t usage_page, uint32_t usage,
+                                             uint8_t down, uint32_t options);
 extern void IOHIDEventAppendEvent(HIDEvent parent, HIDEvent child);
 extern void IOHIDEventSetIntegerValue(HIDEvent event, uint32_t field, int value);
 extern void IOHIDEventSetSenderID(HIDEvent event, uint64_t sender);
@@ -44,6 +47,9 @@ extern int mach_timebase_info(struct mach_timebase_info *info);
 extern int mach_wait_until(uint64_t deadline);
 
 enum {
+    HID_PAGE_CONSUMER = 0x0c,
+    HID_USAGE_CONSUMER_MENU = 0x40,
+    HOME_PRESS_MS = 65,
     DIGITIZER_HAND = 3,
     DIGITIZER_RANGE = 1 << 0,
     DIGITIZER_TOUCH = 1 << 1,
@@ -81,6 +87,12 @@ static uint64_t ticks(int ms)
     return (uint64_t)ms * 1000000 * clock_base.denom / clock_base.numer;
 }
 
+static void dispatch_event(HIDEvent event)
+{
+    IOHIDEventSetSenderID(event, UINT64_C(0xDEFACEDBEEFFECE5));
+    IOHIDEventSystemClientDispatchEvent(hid, event);
+}
+
 static int touch(enum phase phase, double x, double y)
 {
     uint64_t time = mach_absolute_time();
@@ -101,11 +113,32 @@ static int touch(enum phase phase, double x, double y)
     }
     IOHIDEventAppendEvent(hand, finger);
     IOHIDEventSetIntegerValue(hand, DIGITIZER_DISPLAY_INTEGRATED, 1);
-    IOHIDEventSetSenderID(hand, UINT64_C(0xDEFACEDBEEFFECE5));
-    IOHIDEventSystemClientDispatchEvent(hid, hand);
+    dispatch_event(hand);
     CFRelease(finger);
     CFRelease(hand);
     return 0;
+}
+
+static int home_event(uint8_t down, uint64_t timestamp)
+{
+    HIDEvent event = IOHIDEventCreateKeyboardEvent(
+        NULL, timestamp, HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_MENU, down, 0);
+    if (!event)
+        return -1;
+    dispatch_event(event);
+    CFRelease(event);
+    return 0;
+}
+
+static const char *press_home(void)
+{
+    uint64_t start = mach_absolute_time();
+    if (home_event(1, start))
+        return "ERR could not press Home\n";
+    int interrupted = mach_wait_until(start + ticks(HOME_PRESS_MS)) != 0;
+    if (home_event(0, mach_absolute_time()))
+        return "ERR could not release Home\n";
+    return interrupted || stopping ? "ERR Home press interrupted\n" : "OK\n";
 }
 
 static int gesture(double x, double y, double end_x, double end_y, int ms, enum touch_path path)
@@ -222,7 +255,7 @@ static const char *scroll_gesture(const char *steps_word, const char *x_word,
 
 static const char *command(char *line, int touch_held)
 {
-    const char *invalid = "ERR expected ping, tap X Y, hold X Y MS, swipe X1 Y1 X2 Y2 MS, or scroll STEPS [X Y [INTERVAL_MS]]\n";
+    const char *invalid = "ERR expected ping, home, tap, hold, swipe, or scroll\n";
     char *words[6];
     char *cursor = NULL;
     int count = 0;
@@ -236,6 +269,8 @@ static const char *command(char *line, int touch_held)
         return invalid;
     if (count == 1 && !strcmp(words[0], "ping"))
         return "OK iTouch/1\n";
+    if (count == 1 && !strcmp(words[0], "home"))
+        return touch_held ? "ERR a live touch is in progress\n" : press_home();
     if (!strcmp(words[0], "scroll")) {
         if (count == 2)
             return scroll_gesture(words[1], NULL, NULL, NULL, touch_held);
@@ -322,6 +357,8 @@ static const char *live_command(struct live_touch *input, char *line)
     }
     if (!strcmp(line, "up"))
         return lift(input) ? "ERR could not lift touch\n" : "OK\n";
+    if (!strcmp(line, "home"))
+        return lift(input) ? "ERR could not lift touch\n" : press_home();
     if (!strncmp(line, "scroll ", 7))
         return command(line, input->held);
 
@@ -613,7 +650,7 @@ int main(int argc, char **argv)
         line[used++] = i == argc - 1 ? '\n' : ' ';
     }
     if (!used) {
-        fputs("Usage: itouch ping|orientation|tap|hold|swipe|scroll|stream\n", stderr);
+        fputs("Usage: itouch ping|orientation|home|tap|hold|swipe|scroll|stream\n", stderr);
         return 1;
     }
     line[used] = '\0';
